@@ -1,2 +1,3 @@
 # uptime-watch
-Dead-man heartbeat check
+
+Scheduled dead-man check. Nothing to see here.

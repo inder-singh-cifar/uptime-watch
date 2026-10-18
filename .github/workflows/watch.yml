@@ -1,0 +1,66 @@
+name: watch
+# Dead-man check: alerts when the server stops sending its heartbeat
+# (repo variable VPS_HEARTBEAT, unix seconds, updated every 5 min by the server)
+# or when the probe URL answers 5xx. One alert, then a reminder every 2 h,
+# then one "back" line. State is kept in the Actions cache.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: watch
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+      - name: check
+        env:
+          HB: ${{ vars.VPS_HEARTBEAT }}
+          TOKEN: ${{ secrets.TG_ALARM_TOKEN }}
+          CHAT: ${{ secrets.TG_CHAT_ID }}
+          PROBE: ${{ secrets.PROBE_URL }}
+          MAX_AGE_MIN: "15"
+          REMIND_MIN: "120"
+        run: |
+          set -u
+          mkdir -p state; touch state/down
+          now=$(date +%s); et() { TZ=America/New_York date -d "@$1" '+%b %-d %-I:%M %p ET'; }
+          send() { curl -s -m 20 --data-urlencode "chat_id=$CHAT" --data-urlencode "text=$1" "https://api.telegram.org/bot$TOKEN/sendMessage" | grep -q '"ok":true' && echo sent || echo send-failed; }
+          prob=""
+          if ! [[ "${HB:-}" =~ ^[0-9]+$ ]]; then prob="no heartbeat value from the VPS"
+          else
+            age=$(( (now - HB) / 60 ))
+            [ "$age" -ge "$MAX_AGE_MIN" ] && prob="no heartbeat from the VPS for ${age} min (last $(et "$HB"))"
+          fi
+          if [ -n "${PROBE:-}" ]; then
+            code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$PROBE" || echo 000)
+            case "$code" in 5*|000) prob="${prob:+$prob; }Hub site answers $code from outside";; esac
+          fi
+          read -r since last < state/down || true
+          if [ -n "$prob" ]; then
+            echo "problem"
+            if [ -z "${last:-}" ] || [ $(( (now - last) / 60 )) -ge "$REMIND_MIN" ]; then
+              send "VPS #169 OUTSIDE WATCHDOG: $prob. Fix steps: OneDrive 0_ai_agents/vps-backup/RESTORE.md (section 'Second way in')."
+              echo "${since:-$now} $now" > state/down
+            fi
+          else
+            echo "ok"
+            if [ -n "${last:-}" ]; then
+              send "VPS #169 OUTSIDE WATCHDOG: VPS heartbeat is back (was down since $(et "$since"))."
+              : > state/down
+            fi
+          fi
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state
+          key: state-${{ github.run_id }}
